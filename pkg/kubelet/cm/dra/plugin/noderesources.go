@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"time"
 
@@ -47,6 +48,8 @@ const (
 	// resyncPeriod for informer
 	// TODO (https://github.com/kubernetes/kubernetes/issues/123688): disable?
 	resyncPeriod = time.Duration(10 * time.Minute)
+	baseDelay    = 5 * time.Second
+	maxDelay     = 180 * time.Second
 )
 
 // nodeResourcesController collects resource information from all registered
@@ -185,6 +188,8 @@ func (c *nodeResourcesController) monitorPlugin(ctx context.Context, active *act
 		logger.Info("Stopping to monitor node resources of the plugin", "reason", context.Cause(ctx), "err", ctx.Err(), "recover", r)
 	}()
 
+	retryCounter := 0
+
 	// Keep trying until canceled.
 	for ctx.Err() == nil {
 		logger.V(5).Info("Calling NodeListAndWatchResources")
@@ -197,14 +202,19 @@ func (c *nodeResourcesController) monitorPlugin(ctx context.Context, active *act
 			default:
 				// This is a problem, report it and retry.
 				logger.Error(err, "Creating gRPC stream for node resources failed")
-				// TODO (https://github.com/kubernetes/kubernetes/issues/123689): expontential backoff?
+				retryCounter++
+				delay := time.Duration(math.Pow(2, float64(retryCounter-1))) * baseDelay
+				if delay > maxDelay {
+					delay = maxDelay
+				}
 				select {
-				case <-time.After(5 * time.Second):
+				case <-time.After(delay):
 				case <-ctx.Done():
 				}
 			}
 			continue
 		}
+		retryCounter = 0
 		for {
 			response, err := stream.Recv()
 			if err != nil {
@@ -219,9 +229,13 @@ func (c *nodeResourcesController) monitorPlugin(ctx context.Context, active *act
 				case ctx.Err() == nil:
 					// This is a problem, report it and retry.
 					logger.Error(err, "Reading node resources from gRPC stream failed")
-					// TODO (https://github.com/kubernetes/kubernetes/issues/123689): expontential backoff?
+					retryCounter++
+					delay := time.Duration(math.Pow(2, float64(retryCounter-1))) * baseDelay
+					if delay > maxDelay {
+						delay = maxDelay
+					}
 					select {
-					case <-time.After(5 * time.Second):
+					case <-time.After(delay):
 					case <-ctx.Done():
 					}
 				}
